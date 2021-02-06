@@ -9,9 +9,15 @@ Set_Timezone()
 
 CentOS_InstallNTP()
 {
-    Echo_Blue "[+] Installing ntp..."
-    yum install -y ntpdate
-    ntpdate -u pool.ntp.org
+    if echo "${CentOS_Version}" | grep -Eqi "^8" || echo "${RHEL_Version}" | grep -Eqi "^8" || echo "${Oracle_Version}" | grep -Eqi "^8"; then
+        Echo_Blue "[+] Installing chrony..."
+        dnf install chrony -y
+        chronyd -q "server pool.ntp.org iburst"
+    else
+        Echo_Blue "[+] Installing ntp..."
+        yum install -y ntpdate
+        ntpdate -u pool.ntp.org
+    fi
     date
     start_time=$(date +%s)
 }
@@ -118,7 +124,15 @@ RHEL_Modify_Source()
         echo "DO NOT change RHEL repository, use the repository you set."
     else
         echo "RHEL ${RHEL_Ver} will use aliyun centos repository..."
-        wget --prefer-family=IPv4 http://mirrors.aliyun.com/repo/Centos-${RHEL_Ver}.repo -O /etc/yum.repos.d/Centos-${RHEL_Ver}.repo
+        if [ ! -s "/etc/yum.repos.d/Centos-${RHEL_Ver}.repo" ]; then
+            wget --prefer-family=IPv4 http://mirrors.aliyun.com/repo/Centos-${RHEL_Ver}.repo -O /etc/yum.repos.d/Centos-${RHEL_Ver}.repo
+        fi
+        if echo "${RHEL_Version}" | grep -Eqi "^6"; then
+            sed -i "s#centos/\$releasever#centos-vault/\$releasever#g" /etc/yum.repos.d/Centos-${RHEL_Ver}.repo
+            sed -i "s/\$releasever/${RHEL_Version}/g" /etc/yum.repos.d/Centos-${RHEL_Ver}.repo
+        else
+            sed -i "s/\$releasever/${RHEL_Ver}/g" /etc/yum.repos.d/Centos-${RHEL_Ver}.repo
+        fi
         yum clean all
         yum makecache
     fi
@@ -171,6 +185,8 @@ Ubuntu_Modify_Source()
         CodeName='disco'
     elif grep -Eqi "19.10" /etc/*-release || echo "${Ubuntu_Version}" | grep -Eqi '^19.10'; then
         Ubuntu_Deadline eoan
+    elif grep -Eqi "20.10" /etc/*-release || echo "${Ubuntu_Version}" | grep -Eqi '^20.10'; then
+        Ubuntu_Deadline groovy
     fi
     if [ "${CodeName}" != "" ]; then
         \cp /etc/apt/sources.list /etc/apt/sources.list.$(date +"%Y%m%d")
@@ -192,9 +208,9 @@ EOF
 Check_Old_Releases_URL()
 {
     OR_Status=`wget --spider --server-response ${OldReleasesURL}/dists/$1/Release 2>&1 | awk '/^  HTTP/{print $2}'`
-    if [ ${OR_Status} != "404" ]; then
+    if [ "${OR_Status}" = "200" ]; then
         echo "Ubuntu old-releases status: ${OR_Status}";
-        CodeName=$1
+        CodeName="$1"
     fi
 }
 
@@ -203,6 +219,7 @@ Ubuntu_Deadline()
     trusty_deadline=`date -d "2022-4-30 00:00:00" +%s`
     xenial_deadline=`date -d "2024-4-30 00:00:00" +%s`
     eoan_deadline=`date -d "2020-7-30 00:00:00" +%s`
+    groovy_deadline=`date -d "2021-7-30 00:00:00" +%s`
     cur_time=`date  +%s`
     case "$1" in
         trusty)
@@ -223,7 +240,41 @@ Ubuntu_Deadline()
                 Check_Old_Releases_URL eoan
             fi
             ;;
+        groovy)
+            if [ ${cur_time} -gt ${groovy_deadline} ]; then
+                echo "${cur_time} > ${groovy_deadline}"
+                Check_Old_Releases_URL groovy
+            fi
+            ;;
     esac
+}
+
+Check_PowerTools()
+{
+    if ! yum -v repolist all|grep "PowerTools"; then
+        echo "PowerTools repository not found, add PowerTools repository ..."
+        cat >/etc/yum.repos.d/CentOS-PowerTools.repo<<EOF
+[PowerTools]
+name=CentOS-\$releasever - PowerTools
+mirrorlist=http://mirrorlist.centos.org/?release=\$releasever&arch=\$basearch&repo=PowerTools&infra=\$infra
+#baseurl=http://mirror.centos.org/\$contentdir/\$releasever/PowerTools/\$basearch/os/
+gpgcheck=1
+enabled=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial
+EOF
+        if [ "${country}" = "CN" ]; then
+            sed -i "s@^mirrorlist=@#mirrorlist=@" /etc/yum.repos.d/CentOS-PowerTools.repo
+            sed -i "s@^#baseurl=http://mirror.centos.org@baseurl=http://mirror.centos.org/centos@" /etc/yum.repos.d/CentOS-PowerTools.repo
+        fi
+    fi
+    repo_id=$(yum repolist all|grep -Ei "PowerTools"|head -n 1|awk '{print $1}')
+    [ -z "${repo_id}" ] && repo_id="PowerTools"
+}
+
+Check_Codeready()
+{
+    repo_id=$(yum repolist all|grep -E "CodeReady"|head -n 1|awk '{print $1}')
+    [ -z "${repo_id}" ] && repo_id="ol8_codeready_builder"
 }
 
 CentOS_Dependent()
@@ -239,21 +290,16 @@ CentOS_Dependent()
 
     yum -y update nss
 
-    if [ "${DISTRO}" = "CentOS" ] && echo "${CentOS_Version}" | grep -Eqi "^8"; then
-        if ! yum repolist all|grep PowerTools; then
-            echo "PowerTools repository not found, add PowerTools repository ..."
-            cat >/etc/yum.repos.d/CentOS-PowerTools.repo<<EOF
-[PowerTools]
-name=CentOS-\$releasever - PowerTools
-mirrorlist=http://mirrorlist.centos.org/?release=\$releasever&arch=\$basearch&repo=PowerTools&infra=\$infra
-#baseurl=http://mirror.centos.org/\$contentdir/\$releasever/PowerTools/\$basearch/os/
-gpgcheck=1
-enabled=0
-gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial
-EOF
-        fi
-        dnf --enablerepo=PowerTools install rpcgen re2c -y
-        dnf --enablerepo=PowerTools install oniguruma-devel -y
+    if echo "${CentOS_Version}" | grep -Eqi "^8" || echo "${RHEL_Version}" | grep -Eqi "^8"; then
+        Check_PowerTools
+        dnf --enablerepo=${repo_id} install rpcgen re2c -y
+        dnf --enablerepo=${repo_id} install oniguruma-devel -y
+    fi
+
+    if [ "${DISTRO}" = "Oracle" ] && echo "${Oracle_Version}" | grep -Eqi "^8"; then
+        Check_Codeready
+        dnf --enablerepo=${repo_id} install rpcgen re2c -y
+        dnf --enablerepo=${repo_id} install oniguruma-devel -y
     fi
 
     if echo "${CentOS_Version}" | grep -Eqi "^7" || echo "${RHEL_Version}" | grep -Eqi "^7"; then
@@ -413,7 +459,7 @@ Install_Mhash()
 
 Install_Freetype()
 {
-    if echo "${Ubuntu_Version}" | grep -Eqi "^1[89]\.|2[0-9]\." || echo "${Mint_Version}" | grep -Eqi "^19|2[0-9]" || echo "${Deepin_Version}" | grep -Eqi "^15\.[7-9]|15.1[0-9]|1[6-9]|2[0-9]" || echo "${Debian_Version}" | grep -Eqi "^9|10" || echo "${Raspbian_Version}" | grep -Eqi "^9|10"  || echo "${Kali_Version}" | grep -Eqi "^202[0-9]" || echo "${CentOS_Version}" | grep -Eqi "^8"  || echo "${RHEL_Version}" | grep -Eqi "^8" || echo "${Fedora_Version}" | grep -Eqi "^3[0-9]|29"; then
+    if echo "${Ubuntu_Version}" | grep -Eqi "^1[89]\.|2[0-9]\." || echo "${Mint_Version}" | grep -Eqi "^19|2[0-9]" || echo "${Deepin_Version}" | grep -Eqi "^15\.[7-9]|15.1[0-9]|1[6-9]|2[0-9]" || echo "${Debian_Version}" | grep -Eqi "^9|10" || echo "${Raspbian_Version}" | grep -Eqi "^9|10"  || echo "${Kali_Version}" | grep -Eqi "^202[0-9]" || echo "${CentOS_Version}" | grep -Eqi "^8"  || echo "${RHEL_Version}" | grep -Eqi "^8" || echo "${Oracle_Version}" | grep -Eqi "^8" || echo "${Fedora_Version}" | grep -Eqi "^3[0-9]|29"; then
         Download_Files ${Download_Mirror}/lib/freetype/${Freetype_New_Ver}.tar.xz ${Freetype_New_Ver}.tar.xz
         Echo_Blue "[+] Installing ${Freetype_New_Ver}"
         TarJ_Cd ${Freetype_New_Ver}.tar.xz ${Freetype_New_Ver}
